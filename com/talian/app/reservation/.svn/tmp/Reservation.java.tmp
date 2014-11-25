@@ -1,0 +1,191 @@
+/*
+ *
+ * 
+ *
+ * (C) COPYRIGHT Talian Limited, 2011
+ *
+ * The source code for this program is not published or otherwise
+ * divested of its trade secrets.
+ *
+ */
+package com.talian.app.reservation;
+
+import java.rmi.RemoteException;
+import java.util.Comparator;
+
+import psdi.bo.Mbo;
+import psdi.bo.MboRemote;
+import psdi.bo.MboSet;
+import psdi.util.CocoException;
+
+import com.talian.app.heli.Fleet;
+import com.talian.app.route.Route.Leg;
+
+/**
+ * @author Seno
+ *
+ */
+public class Reservation extends Mbo implements ReservationRemote {
+	private Integer reservationid ;
+	private String org ;
+	private String dest ;
+	private String name ;
+	private Double weight ;
+	private Fleet  servedby ;
+	private int    qty ;
+	private int    priority ;
+	private boolean dummyRefueling ;
+	private Double etd ;
+	private Double eta ;
+
+	/**
+	 * @param ms
+	 * @throws RemoteException
+	 */
+	public Reservation(MboSet ms) throws RemoteException {
+		super(ms) ;
+		qty = 1 ;
+		weight = 0.0 ;
+		dummyRefueling = false ;
+		priority = PRIORITY_NORMAL ;
+
+		etd = Double.MAX_VALUE ;
+		eta = Double.MIN_VALUE ;
+	}
+
+	/**
+	 * @param ms
+	 * @throws RemoteException
+	 */
+	public Reservation(MboSet ms, int qty, boolean dummyRefueling) throws RemoteException {
+		super(ms) ;
+		this.qty = qty ;
+		weight = 0.0 ;
+		this.dummyRefueling = dummyRefueling ;
+	}	
+	
+	public void setServedBy (Fleet servedby) {
+		this.servedby = servedby ;
+	}
+
+	public void setFirstETD (Leg leg) {
+		if (etd > leg.getETD())
+			etd = leg.getETD() ;
+	}
+
+	public void setLastETA (Leg leg) {
+		if (eta < leg.getETA())
+			eta = leg.getETA() ;
+	}
+
+	public Fleet getServedBy () {
+		return this.servedby ;
+	}
+
+	private void readfromMbo () throws RemoteException, CocoException {
+		reservationid = getInt ("reservationid") ;
+		setOrg(getString ("org")) ;
+		setDest(getString ("dest")) ;
+		setPaxName(getString ("displayname")) ;
+		setWeight(getDouble ("paxweight") + getDouble ("luggageweight")) ;		
+		
+		String strPriority = getString("priority") ;
+		if ("A".equalsIgnoreCase(strPriority))
+			priority = PRIORITY_VIP_01 ;
+		else if ("B".equalsIgnoreCase(strPriority))
+			priority = PRIORITY_VIP_02 ;
+		else
+			priority = PRIORITY_NORMAL ;
+	}
+	
+	static public Reservation readfromMBO (MboRemote mbo) throws RemoteException, CocoException {
+		Reservation resv = (Reservation)mbo;
+		resv.readfromMbo() ;
+		return resv ;
+	}
+
+	public void setOrg(String org) {
+		this.org = org;
+	}
+
+	public String getOrg() {
+		return org;
+	}
+	
+	public int getPriority () {
+		return priority;
+	}
+	
+	public boolean isBlockingVIP () {
+		return priority == PRIORITY_VIP_01 ;
+	}
+
+	public void setDest(String dest) {
+		this.dest = dest;
+	}
+
+	public String getDest() {
+		return dest;
+	}
+
+	public void setPaxName(String name) {
+		this.name = name;
+	}
+
+	public String getPaxName() {
+		return name;
+	}
+
+	public void setQty(int qty) {
+		this.qty = qty ;
+	}
+
+	public int getQty() {
+		return qty;
+	}
+	
+	public boolean isDummyRefueling () {
+		return dummyRefueling ;
+	}
+
+	
+	public void setWeight(Double weight) {
+		this.weight = weight;
+	}
+
+	public Double getWeight() {
+		return weight;
+	}
+	
+	public Integer getId () {
+		return reservationid ;
+	}
+	
+	public Double getEtd() {
+		return etd;
+	}
+
+	public Double getEta() {
+		return eta;
+	}
+
+	public static final Comparator<Reservation> NAME_ORDER  = new Comparator<Reservation>() {
+		public int compare (Reservation r1, Reservation r2) {
+			return r1.name.compareTo(r2.name) ;
+		}
+	} ;
+
+	public static final Comparator<Reservation> ETD_ORDER  = new Comparator<Reservation>() {
+		public int compare (Reservation r1, Reservation r2) {
+			Long etd1 = r1.etd.longValue() * 10000L ;
+			Long etd2 = r2.etd.longValue() * 10000L ;
+
+			Long delta = etd1 - etd2 ;
+			if (delta == 0L)
+				return NAME_ORDER.compare(r1, r2) ;
+
+			return delta.intValue() ;
+		}
+	} ;
+
+}

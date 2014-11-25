@@ -1,0 +1,576 @@
+/*
+ *
+ *
+ *
+ * (C) COPYRIGHT Talian Limited, 2011
+ *
+ * The source code for this program is not published or otherwise
+ * divested of its trade secrets.
+ *
+ */
+package com.talian.app.scenario;
+
+import java.rmi.RemoteException;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+
+import psdi.bo.MboConstants;
+import psdi.bo.MboRemote;
+import psdi.bo.MboSet;
+import psdi.bo.MboSetRemote;
+import psdi.util.CocoException;
+import psdi.util.MXSession;
+
+import com.talian.app.fuel.ITripFuelCalc;
+import com.talian.app.fuel.SimpleFuelCalc;
+import com.talian.app.heli.Fleet;
+import com.talian.app.reservation.Reservation;
+import com.talian.app.route.Distance;
+import com.talian.app.route.Port;
+import com.talian.app.route.Route;
+import com.talian.app.route.Route.Leg;
+import com.talian.app.route.Route.VisitedPort;
+import com.talian.app.scenass.ScenassSetRemote;
+import com.talian.app.scenresv.ScenresvSetRemote;
+
+/**
+ * @author Seno
+ * Class for managing flight session scenario
+ * This class is optimized for speed, so there is redundant variables
+ */
+public class FlightScenario implements MboConstants {
+	private String scenarioId ;
+	private String description ;
+	private String status ;
+
+	private HashMap<String, Fleet> availableFleet ;
+	private HashMap<String, Port> availablePorts ;
+	private HashMap<String, Distance> distanceTable ;
+	private MboRemote mbo ;
+	private MXSession mxsession ;
+	private Configuration config ;
+	private ITripFuelCalc tripcalc ;
+	private boolean isChanged ;
+
+	public FlightScenario () {
+		setScenarioId(null) ;
+		availableFleet = new HashMap<String, Fleet>() ;
+		availablePorts = new HashMap<String, Port>() ;
+		distanceTable = new HashMap<String, Distance>() ;
+		tripcalc = new SimpleFuelCalc() ;
+		isChanged = false ;
+
+		description = "" ;
+		status = "DRAFT" ;
+	}
+
+	private void setMbo (MboRemote mbo) {
+		this.mbo = mbo ;
+	}
+
+	public Fleet[] getFleetArray () {
+		if (availableFleet.isEmpty())
+			return null ;
+
+		Fleet p[] = new Fleet[availableFleet.size()] ;
+		Iterator<String> it =availableFleet.keySet().iterator() ;
+		for (int i=0; it.hasNext(); i++) {
+			p[i] = availableFleet.get(it.next()) ;
+		}
+
+		return p ;
+	}
+
+	public Port[] getPortArray () {
+		if (availablePorts.isEmpty())
+			return null ;
+
+		Port p[] = new Port[availablePorts.size()] ;
+		Iterator<String> it =availablePorts.keySet().iterator() ;
+		for (int i=0; it.hasNext(); i++) {
+			p[i] = availablePorts.get(it.next()) ;
+		}
+
+		return p ;
+	}
+
+	// score is calculated based on distance in minutes
+	public Double getScore () throws RemoteException, CocoException {
+		Iterator<String> it = availableFleet.keySet().iterator() ;
+		Double score = 0.0 ;
+		while (it.hasNext()) {
+			String acreg = it.next() ;
+			Fleet thefleet = availableFleet.get(acreg) ;
+			Route theroute = thefleet.getRoute() ;
+
+			score += theroute.distanceToInMinutes() ;
+		}
+
+		return score ;
+	}
+
+	public Fleet getFleet (String acreg) {
+		return availableFleet.get(acreg) ;
+	}
+
+	public HashMap<String, Fleet> getAvailableFleet () {
+		return availableFleet ;
+	}
+
+	public HashMap<String, Port> getAvailablePorts () {
+		return availablePorts ;
+	}
+
+	@Override
+	public String toString() {
+		return this.scenarioId;
+	}
+
+	public Port getPort (String port) {
+		return availablePorts.get(port) ;
+	}
+
+	public Distance getDistance (String p1, String p2) {
+		return distanceTable.get(p1 + p2) ;
+	}
+
+	public Distance getDistance (Port p1, Port p2) {
+		return distanceTable.get(p1.getPort()+p2.getPort()) ;
+	}
+
+	public ITripFuelCalc getTripFuelCalculator () {
+		return tripcalc ;
+	}
+
+	public Configuration getConfig () {
+		return config ;
+	}
+
+	public int getCalculationBase () {
+		return config.calculationBase ;
+	}
+
+	public void cleanUp () throws RemoteException, CocoException {
+		Iterator<String> it = availableFleet.keySet().iterator() ;
+		while (it.hasNext()) {
+			String acreg = it.next() ;
+			Fleet thefleet = availableFleet.get(acreg) ;
+			thefleet.clearAssignment() ;
+		}
+	}
+
+	public boolean isModified () {
+		return isChanged ;
+	}
+
+	public void setModified () {
+		isChanged = true ;
+	}
+
+	public void clearModified () {
+		isChanged = false ;
+	}
+
+	public void setOAT (Double oat) {
+		config.defaultOAT = oat ;
+	}
+
+	public void setCrewWeight (Double cw) {
+		config.defaultCrewWeight = cw ;
+	}
+
+	public void setHeadwind (Double hw) {
+		config.defaultHeadwind = hw ;
+	}
+
+	public void save () throws RemoteException, CocoException {  // save to mbo
+		if (mbo == null)
+			return ;
+
+		isChanged = false ;
+
+		mbo.setValue("description", description, NOACCESSCHECK) ;
+		mbo.setValue("status", status, NOACCESSCHECK) ;
+		mbo.setValue("totsvctime", this.getScore(), NOACCESSCHECK);
+
+		if (mbo.isNew()) {
+
+			MboSetRemote fleets = mbo.getMboSet("availfleets") ;
+			Iterator<String> it = availableFleet.keySet().iterator() ;
+			while (it.hasNext()) {
+				String acreg = it.next() ;
+				Fleet thefleet = availableFleet.get(acreg) ;
+				
+				// Route
+				Route route = thefleet.getRoute() ;
+				VisitedPort vp = route.getStartPos() ;
+
+				int legseq = 1 ;
+				while (vp != null) {
+					Leg la = vp.getLegAfter () ;
+					List<Reservation> servedpax = la.getServedPax() ;
+					if (servedpax != null) {
+						Iterator<Reservation> ir = servedpax.iterator() ;
+						int order = 1 ;
+						while (ir.hasNext()) {
+							Reservation r  = ir.next() ;
+							
+							// save to mbo
+							// order, acreg, legseq, legorg - legest, scenario 
+							
+							
+							order ++ ;
+						}
+					}
+					
+					legseq ++ ;
+					if (la != null) {
+						vp = la.getTo() ;
+					}
+					else
+						vp = null ;
+				}
+
+				
+				
+				MboRemote flt = fleets.add() ;
+				flt.setValue ("scenarioid", getScenarioId()) ;
+				thefleet.save (flt) ;
+			}
+
+			MboSetRemote ports = mbo.getMboSet("availports") ;
+			Iterator<String> it2 = availablePorts.keySet().iterator() ;
+			while (it2.hasNext()) {
+				String port = it2.next() ;
+				Port theport = availablePorts.get(port) ;
+				MboRemote prt = ports.add() ;
+				prt.setValue ("scenarioid", getScenarioId()) ;
+				theport.save (prt) ;
+			}
+
+			MboSetRemote configs = mbo.getMboSet("scenconfig") ;
+			MboRemote cfg = configs.add() ;
+			cfg.setValue ("scenarioid", getScenarioId()) ;
+			config.save (cfg) ;
+
+			MboSetRemote distance = mbo.getMboSet("scendistance") ;
+			Iterator<String> it3 = distanceTable.keySet().iterator() ;
+			while (it3.hasNext()) {
+				String key = it3.next() ;
+				Distance thedistance = distanceTable.get(key) ;
+				MboRemote dist = distance.add() ;
+				dist.setValue("scenarioid", getScenarioId());
+				thedistance.save (dist) ;
+			}
+
+			Iterator<String> it4 = availableFleet.keySet().iterator();
+			ScenassSetRemote scenassset = (ScenassSetRemote)mbo.getMboSet("scenass") ;
+			while (it4.hasNext()) {
+				Fleet usedFleet = getFleet(it4.next());
+				Route usedRoute = usedFleet.getRoute();
+				String[] usedPorts = usedRoute.toPortNameArray();
+				if (usedPorts != null) {
+					for (int i = 0; i < usedPorts.length; i++) {
+						scenassset.add();
+						String port = usedPorts[i];
+						scenassset.setValue("scenarioid", getScenarioId());
+						scenassset.setValue("heliport", port);
+						scenassset.setValue("sequence", i+1);
+						scenassset.setValue("acreg", usedFleet.getACREG());
+						scenassset.setValue("refuel", usedRoute.getRefuelingStatus()[i]);
+					}
+				}
+//				scenassset.save();
+			}
+
+			Iterator<String> it5 = availableFleet.keySet().iterator();
+			ScenresvSetRemote scenresvset = (ScenresvSetRemote)mbo.getMboSet("scenresv") ;
+			while (it5.hasNext()) {
+				Fleet usedFleet = getFleet(it5.next());
+				Route usedRoute = usedFleet.getRoute();
+				HashMap<Integer, Reservation> currResv = usedRoute.getReservation();
+				if (currResv != null) {
+					Iterator<Integer> it6 = currResv.keySet().iterator();
+					int resvidx = 0;
+					while (it6.hasNext()) {
+						scenresvset.add();
+						scenresvset.setValue("scenarioid", getScenarioId());
+						scenresvset.setValue("reservationid", it6.next());
+						scenresvset.setValue("sequence", resvidx);
+						scenresvset.setValue("acreg", usedFleet.getACREG());
+						resvidx++;
+					}
+				}
+//				scenresvset.save();
+			}
+			mbo.getThisMboSet().save();
+		}
+		else {
+			//delete old scenario assignment
+			ScenassSetRemote oldscenassset = (ScenassSetRemote)mbo.getMboSet("scenass#1", "scenass",
+					"scenarioid="+getScenarioId()) ;
+			oldscenassset.deleteAll();
+			oldscenassset.save();
+
+			//delete old scenario reservation
+			ScenresvSetRemote oldscenresvset = (ScenresvSetRemote)mbo.getMboSet("scenresv#1", "scenresv",
+					"scenarioid="+getScenarioId()) ;
+			oldscenresvset.deleteAll();
+			oldscenassset.save();
+
+
+			Iterator<String> it4 = availableFleet.keySet().iterator();
+			ScenassSetRemote scenassset = (ScenassSetRemote)mbo.getMboSet("scenass") ;
+			while (it4.hasNext()) {
+				Fleet usedFleet = getFleet(it4.next());
+				Route usedRoute = usedFleet.getRoute();
+				String[] usedPorts = usedRoute.toPortNameArray();
+				if (usedPorts != null) {
+					for (int i = 0; i < usedPorts.length; i++) {
+						scenassset.add();
+						String port = usedPorts[i];
+						scenassset.setValue("scenarioid", getScenarioId());
+						scenassset.setValue("heliport", port);
+						scenassset.setValue("sequence", i+1);
+						scenassset.setValue("acreg", usedFleet.getACREG());
+						scenassset.setValue("refuel", usedRoute.getRefuelingStatus()[i]);
+					}
+				}
+			}
+
+			Iterator<String> it5 = availableFleet.keySet().iterator();
+			ScenresvSetRemote scenresvset = (ScenresvSetRemote)mbo.getMboSet("scenresv") ;
+			while (it5.hasNext()) {
+				Fleet usedFleet = getFleet(it5.next());
+				Route usedRoute = usedFleet.getRoute();
+				HashMap<Integer, Reservation> currResv = usedRoute.getReservation();
+				if (currResv != null) {
+					Iterator<Integer> it6 = currResv.keySet().iterator();
+					int resvidx = 0;
+					while (it6.hasNext()) {
+						scenresvset.add();
+						scenresvset.setValue("scenarioid", getScenarioId());
+						scenresvset.setValue("reservationid", it6.next());
+						scenresvset.setValue("sequence", resvidx);
+						scenresvset.setValue("acreg", usedFleet.getACREG());
+						resvidx++;
+					}
+				}
+			}
+			mbo.getThisMboSet().save();
+		}
+	}
+
+	public HashMap<Integer, Reservation> getAssignResv(String acreg) throws RemoteException, CocoException {
+		Fleet usedFleet = getFleet(acreg);
+		Route usedRoute = usedFleet.getRoute();
+		HashMap<Integer, Reservation> currResv = usedRoute.getReservation();
+		return currResv;
+	}
+
+	static public FlightScenario readfromMBO (MboRemote mbo) throws RemoteException, CocoException {
+		FlightScenario fs = new FlightScenario() ;
+		fs.setMbo(mbo) ;
+
+		fs.setScenarioId(mbo.getString("scenarioid")) ;
+		fs.description = mbo.getString("description") ;
+		fs.status = mbo.getString("status") ;
+
+		MboSetRemote fleets = mbo.getMboSet("availfleets") ;
+
+		MboRemote fleet = fleets.moveFirst() ;
+		while (fleet != null) {
+			Fleet flt = Fleet.readfromMBO(fs,fleet) ;
+			fs.availableFleet.put(flt.getACREG(), flt) ;
+			fleet = fleets.moveNext() ;
+		}
+
+		MboSetRemote ports = mbo.getMboSet("availports") ;
+		MboRemote port = ports.moveFirst() ;
+		while (port != null) {
+			Port prt = Port.readfromMBO(fs,port) ;
+			fs.availablePorts.put(prt.getPort(), prt) ;
+			port = ports.moveNext();
+		}
+
+		MboSetRemote configs = mbo.getMboSet("scenconfig") ;
+		MboRemote cfg = configs.moveFirst() ;
+		fs.config = Configuration.readfromMBO(cfg) ;
+
+		MboSetRemote distances = mbo.getMboSet("scendistance") ;
+		MboRemote distance = distances.moveFirst() ;
+		while (distance != null) {
+			Distance d0 = Distance.readfromMBO(fs,distance) ;
+			fs.distanceTable.put(d0.getKey(), d0) ;
+			distance = distances.moveNext() ;
+		}
+
+		return fs ;
+	}
+
+	static public FlightScenario reuseScenario (FlightScenario scen, FlightScenario reusable) throws RemoteException, CocoException {
+		MXSession session = scen.getMXSession() ;
+
+		FlightScenario fs = new FlightScenario() ;
+		fs.setMXSession(session) ;
+
+ 		MboRemote mbo = null ;
+ 		if (reusable != null)
+ 			mbo = reusable.mbo ;
+ 		if (mbo == null) {
+ 			MboSetRemote mboset = session.getMboSet ("flightscenario") ;
+ 			mbo = mboset.add() ;
+ 		}
+
+		fs.setMbo(mbo) ;
+		mbo.setValue("reservedate", scen.getDate()) ;
+		mbo.setValue("flightsession", scen.getFlightSession()) ;
+
+		fs.scenarioId = mbo.getString("scenarioid") ;
+		fs.availableFleet.putAll(scen.availableFleet) ;
+		fs.scenarioId = mbo.getString("scenarioid") ;
+		fs.availablePorts.putAll(scen.availablePorts) ;
+		fs.distanceTable.putAll(scen.distanceTable) ;
+		fs.config = scen.getConfig().copy() ;
+
+		Iterator<String> it = scen.availableFleet.keySet().iterator();
+		while (it.hasNext()) {
+			String acreg = it.next() ;
+			Fleet flt = scen.availableFleet.get(acreg) ;
+			Fleet copyflt = flt.copy() ;
+			fs.availableFleet.put(acreg, copyflt) ;
+		}
+		return fs ;
+	}
+
+	static public FlightScenario copyScenario (FlightScenario scen) throws RemoteException, CocoException {
+		return reuseScenario(scen, null) ;
+	}
+
+
+	static public FlightScenario newRecord (MXSession session, Date reserveDate, String flightsession) throws RemoteException, CocoException {
+		MboSetRemote mboset = session.getMboSet ("flightscenario") ;
+
+		FlightScenario fs = new FlightScenario() ;
+		fs.setMXSession(session) ;
+
+ 		MboRemote mbo = mboset.add() ;
+		fs.setMbo(mbo) ;
+		mbo.setValue("reservedate", reserveDate) ;
+		mbo.setValue("flightsession", flightsession) ;
+
+		fs.setScenarioId(mbo.getString("scenarioid")) ;
+		fs.status = "DRAFT" ;
+
+		MboSetRemote fleets = session.getMboSet("acreg") ;
+		fleets.setWhere("status = 'ACTIVE'") ;
+
+		MboRemote fleet = fleets.moveFirst() ;
+		while (fleet != null) {
+			Fleet flt = Fleet.readfromMBO(fs,fleet) ;
+			fs.availableFleet.put(flt.getACREG(), flt) ;
+			fleet = fleets.moveNext() ;
+		}
+
+		MboSetRemote ports = session.getMboSet ("heliport") ;
+		MboRemote prt = ports.moveFirst() ;
+		while (prt != null) {
+			Port heliport = Port.readfromMBO(fs,prt) ;
+			fs.availablePorts.put(heliport.getPort(), heliport) ;
+			prt  = ports.moveNext() ;
+		}
+
+		MboSetRemote configs = session.getMboSet("scenconfig") ;
+		configs.setWhere("scenarioid is null") ;
+		MboRemote cfg = configs.moveFirst() ;
+		fs.config = Configuration.readfromMBO(cfg) ;
+
+		MboSetRemote distances = session.getMboSet ("distance") ;
+		MboRemote dist = distances.moveFirst() ;
+		while (dist != null) {
+			Distance d0 = Distance.readfromMBO(fs,dist) ;
+			fs.distanceTable.put(d0.getKey(), d0) ;
+			dist  = distances.moveNext() ;
+		}
+
+		return fs ;
+	}
+
+
+	public void setScenarioId(String scenarioId) {
+		this.scenarioId = scenarioId;
+	}
+
+	public void setDescription(String description) {
+		this.description = description;
+	}
+
+	public String getScenarioId() {
+		return scenarioId;
+	}
+
+	public MXSession getMXSession() {
+		return mxsession;
+	}
+
+	public void setMXSession (MXSession mxsession) {
+		this.mxsession = mxsession ;
+	}
+
+	public Date getDate () {
+		try {
+			if (mbo != null)
+				return mbo.getDate("reservedate") ;
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+
+		return null ;
+	}
+
+	public String getFlightSession () {
+		try {
+			if (mbo != null)
+				return mbo.getString("flightsession") ;
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+
+		return null ;
+	}
+
+	public String[] getRefuelingPorts(Route result){
+		String[] currRes = result.toPortNameArray();
+		if (currRes==null)
+			return null ;
+
+		List<Port> LRefuelingPorts = new ArrayList<Port>();
+		Port[] availablePort = getPortArray();
+		for (int i = 0; i < availablePort.length; i++) {
+			boolean isRepeated = false;
+			Port port = availablePort[i];
+			if (port.isRefueling()) {
+				for (int j = 0; j < currRes.length; j++) {
+					if (currRes[j].equals(port.getPort())) {
+						isRepeated = true;
+					}
+				}
+				if (!isRepeated) {
+					LRefuelingPorts.add(port);
+					isRepeated = false;
+				}
+			}
+		}
+
+		String[] refuelingPorts= new String[LRefuelingPorts.size()];
+		for (int i=0; i < LRefuelingPorts.size(); i++) {
+			refuelingPorts[i] = LRefuelingPorts.get(i).getPort();
+		}
+		return refuelingPorts;
+	}
+
+	public static int MAXFLEET = 64 ;
+}

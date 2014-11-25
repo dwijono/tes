@@ -1,0 +1,111 @@
+/*
+ *
+ * 
+ *
+ * (C) COPYRIGHT Talian Limited, 2010
+ *
+ * The source code for this program is not published or otherwise
+ * divested of its trade secrets, irrespective of what has been
+ * deposited.
+ *
+ */
+
+
+package com.talian.app.heli;
+
+import java.rmi.RemoteException ;
+import java.util.ArrayList ;
+import java.util.Date ;
+import java.util.List ;
+
+import psdi.server.AppService ;
+import psdi.server.CocoServer ;
+import psdi.util.CocoException ;
+import psdi.util.MXSystemException ;
+
+import com.talian.app.schedulling.Scheduller ;
+
+
+public class HeliService extends AppService implements HeliServiceRemote
+{
+	List<String> servicelog = new ArrayList<String>();
+	boolean isRunning = false ;
+	boolean isStopping = false ;
+	
+    public HeliService() throws RemoteException
+	{
+        super();
+    }
+    
+    public HeliService(CocoServer mxServer) throws RemoteException
+	{
+    	super(mxServer);
+    }
+    
+    public boolean isSchedullerRunning ()  throws RemoteException {
+    	return isRunning ;
+    }
+
+    public void setSchedullerRunning (boolean isRun)  throws RemoteException {
+    	if (isRun)
+    		isStopping = false ;
+    	isRunning = isRun ;
+    }
+    
+    public void runScheduller(Date tripDate, String flightsession) throws RemoteException, CocoException
+    {
+    	Scheduller scheduller = null ;
+    	try {
+	    	scheduller = Scheduller.startInstance(this, tripDate, flightsession) ;
+	    	scheduller.init() ;
+	    	
+	    }
+    	catch (RemoteException re) {
+    		if (scheduller != null)
+    			scheduller.stop() ;
+    		throw re ;
+    	}
+    	catch (CocoException ce) {
+    		if (scheduller != null)
+    			scheduller.stop() ;
+    		throw ce ;
+    	}
+    	catch (Throwable t) {
+    		if (scheduller != null)
+    			scheduller.stop() ;
+    		throw new MXSystemException("system", "major", t) ;
+    	}
+    }
+    
+    public void putLog (String s) throws RemoteException {
+    	synchronized (this) {
+        	servicelog.add(Thread.currentThread().getName() + ": " + s) ;			
+		}
+    }
+    
+    public List<String> getServiceLog () throws RemoteException, CocoException {
+    	synchronized (this) {
+    		List<String> result = new ArrayList<String>() ;
+    		result.addAll(servicelog) ;
+    		servicelog.clear() ;
+    		return result ;
+		}
+    }
+    
+    public boolean isRunning (Date tripDate, String flightsession) throws RemoteException, CocoException {
+    	return Scheduller.isStarted(tripDate, flightsession) ;
+    }
+
+	@Override
+	public void stopScheduller() throws RemoteException {
+		putLog ("Stopping the scheduller..") ;
+		isStopping = true ;
+	}
+	
+	@Override
+	public boolean isStopping() throws RemoteException {
+		return isStopping;
+	}
+    
+    
+}

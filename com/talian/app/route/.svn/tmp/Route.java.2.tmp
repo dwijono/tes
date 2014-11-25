@@ -1,0 +1,1274 @@
+/*
+ *
+ *
+ *
+ *
+ * The source code for this program is not published or otherwise
+ * divested of its trade secrets.
+ *
+ */
+package com.talian.app.route;
+
+import java.rmi.RemoteException;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+
+import psdi.util.CocoException;
+
+import com.talian.app.fuel.IFuelBurnedJourney;
+import com.talian.app.fuel.IFuelConsumer;
+import com.talian.app.fuel.IFuelPoint;
+import com.talian.app.fuel.ITripFuelCalc;
+import com.talian.app.heli.Fleet;
+import com.talian.app.reservation.Reservation;
+import com.talian.app.scenario.Configuration;
+import com.talian.app.scenario.FlightScenario;
+
+/**
+ * @author Seno
+ *
+ */
+public class Route implements IFuelBurnedJourney {
+	FlightScenario scenario ;
+	VisitedPort startpos ;		// starting base station
+	VisitedPort endpos ;		// ending base station
+	LinkedList<VisitedPort> visitedports ;
+	HashMap<Integer, Reservation> reservations ;
+	HashMap<Integer, Reservation> invalidreservations ;
+	int lastIndex ;
+	boolean changed ;
+	boolean isValid ;
+	Fleet   thefleet ;
+	Reservation blocking_vip ;
+
+	public Route (FlightScenario scenario, Fleet afleet) {
+		this.scenario = scenario ;
+		this.thefleet = afleet ;
+		lastIndex = 0 ;
+
+		visitedports = new LinkedList<VisitedPort>() ;
+		reservations = new HashMap<Integer, Reservation>();
+		invalidreservations = new HashMap<Integer, Reservation>();
+
+		isValid = true ;
+		changed = false ;
+
+		blocking_vip = null;
+	}
+
+	public Route copy () {
+		String [] ports = toPortNameArray() ;
+		return rearrange(ports) ;
+	}
+
+	public void mergeInvalids (Route tr) {
+		for (Iterator<Integer> iterator = tr.invalidreservations.keySet().iterator(); iterator.hasNext();) {
+			Integer resvid = iterator.next();
+			Reservation resv = tr.invalidreservations.get(resvid) ;
+			invalidreservations.put(resvid, resv) ;
+		}
+	}
+
+	public Route rearrange (String [] proposedports) {
+		Route newroute = new Route (scenario, thefleet) ;
+		if (proposedports == null)
+			return newroute ;
+
+		VisitedPort lastvp = null ;
+
+		// arrange the visited ports as proposed
+		for (int i=0; i<proposedports.length; i++) {
+			String port = proposedports[i] ;
+			VisitedPort vp = new VisitedPort (thefleet, scenario.getPort(port)) ;
+			newroute.visitedports.add(vp) ;
+
+			if (lastvp != null) {
+				Leg lg = new Leg(thefleet, lastvp, vp) ;
+				lastvp.legafter = lg ;
+				vp.legbefore = lg ;
+			}
+			lastvp = vp ;
+		}
+		newroute.startpos = newroute.visitedports.getFirst() ;
+		newroute.endpos = newroute.visitedports.getLast() ;
+
+		// reinsert the reservation
+		for (Iterator iterator = reservations.keySet().iterator(); iterator.hasNext();) {
+			Integer resvid = (Integer) iterator.next();
+			Reservation resv = reservations.get(resvid) ;
+			newroute.addPortAtEnd(resv, true) ;
+		}
+
+		return newroute ;
+	}
+
+	public Route rearrange (Port [] proposedports) {
+		Route newroute = new Route (scenario, thefleet) ;
+		if (proposedports == null)
+			return newroute ;
+
+		VisitedPort lastvp = null ;
+
+		// arrange the visited ports as proposed
+		for (int i=0; i<proposedports.length; i++) {
+			Port port = proposedports[i] ;
+			VisitedPort vp = new VisitedPort (thefleet, port) ;
+			newroute.visitedports.add(vp) ;
+
+			if (lastvp != null) {
+				Leg lg = new Leg(thefleet, lastvp, vp) ;
+				lastvp.legafter = lg ;
+				vp.legbefore = lg ;
+			}
+			lastvp = vp ;
+		}
+		newroute.startpos = newroute.visitedports.getFirst() ;
+		newroute.endpos = newroute.visitedports.getLast() ;
+
+		// reinsert the reservation
+		for (Iterator iterator = reservations.keySet().iterator(); iterator.hasNext();) {
+			Integer resvid = (Integer) iterator.next();
+			Reservation resv = reservations.get(resvid) ;
+			newroute.addPortAtEnd(resv, true) ;
+		}
+
+		return newroute ;
+	}
+
+	public void setStartPos (String start) {
+		this.startpos = new VisitedPort (thefleet, scenario.getPort(start)) ;
+	}
+
+	public void setEndPos (String end) {
+		this.endpos = new VisitedPort (thefleet, scenario.getPort(end)) ;
+	}
+
+	public VisitedPort getStartPos () {
+		return startpos ;
+	}
+
+	public void clear () {
+		changed = true ;
+		lastIndex = 0 ;
+
+		visitedports= null ;
+
+		visitedports = new LinkedList<VisitedPort>() ;
+
+		invalidreservations.clear() ;
+		reservations.clear() ;
+
+		startpos = null ;
+		endpos = null ;
+
+		isValid = true ;
+	}
+
+	public HashMap<Integer,Reservation> getReservation () {
+		return reservations ;
+	}
+
+	public boolean isChanged () {
+		return changed ;
+	}
+
+	public boolean preValidateResv (Reservation resv) {
+		Port p1 = scenario.getPort(resv.getOrg()) ;
+		return ! isFull(p1) ;
+	}
+
+	//TODO: check weight also
+	public boolean isFull (Port p) {
+		if (blocking_vip != null)
+			return true ;
+
+		int[] idxs = findPort(p) ;
+		if (idxs!=null) {
+			for (int i=0; i<idxs.length; i++) {
+				int ivp = idxs[i] ;
+				if (ivp>=0) {
+					VisitedPort vp = visitedports.get(ivp) ;
+					if (vp.legafter != null) {
+						if (vp.legafter.paxonboard>=thefleet.paxcapacity)
+							return true ;
+					}
+				}
+			}
+		}
+		return false ;
+	}
+
+	public boolean isInInvalidList (Reservation resv) {
+		return invalidreservations.containsKey(resv.getId()) ;
+	}
+
+	private void adjustFuelForward (VisitedPort port) {
+		if (port==null)
+			return ;
+
+		Double fuelneed = 0.0 ;
+		if (port.legbefore != null) {
+			fuelneed = port.legbefore.from.fuelneed ;
+			fuelneed += (1.06 * port.legbefore.tripFuel()) ;
+		}
+
+		port.fuelneed = fuelneed ;
+		if (port.legafter != null) {
+			port.fuelneed += 1.06 * thefleet.takeofffuel ;
+
+			if (! port.isrefueling)
+				adjustFuelForward(port.legafter.to) ;
+		}
+		else {
+			Double resfuel = thefleet.cruisefuel * thefleet.resfuel / 60.0;
+			fuelneed += thefleet.alternatefuel + resfuel + thefleet.taxifuel ;
+
+			adjustFuelBackward(port) ;
+		}
+	}
+
+	private void adjustFuelBackward (VisitedPort port) {
+		if (port==null)
+			return ;
+
+		Double fueluploadneed = 0.0 ;
+		if (port.legafter != null) {
+			fueluploadneed = port.legafter.to.fueluploadneed ;
+			fueluploadneed += (1.06 *  port.legafter.tripFuel()) ;
+			fueluploadneed += (1.06 * thefleet.takeofffuel) ;
+		}
+		else
+			fueluploadneed += thefleet.alternatefuel + thefleet.resfuel + thefleet.taxifuel ;
+
+		port.fueluploadneed = fueluploadneed ;
+
+		Double crewweight = this.thefleet.getScenario().getConfig().defaultCrewWeight ;
+		port.payload = thefleet.mtow  - thefleet.eew - crewweight ;
+		port.payload -= port.getPenalty () ;
+		port.payload -= fueluploadneed ;
+
+		if (port.legbefore != null) {
+			VisitedPort vpfrom = port.legbefore.from ;
+			if (! vpfrom.isrefueling)
+				adjustFuelBackward(port.legbefore.from) ;    // forward only if refueling
+		}
+	}
+
+	//TODO: don't remove if the port is refueling point
+	public void removeReservation (Integer resvid) {
+		Reservation resv = reservations.get(resvid) ;
+		if (resv != null) {
+			Port p1 = scenario.getPort(resv.getOrg()) ;
+			Port p2 = scenario.getPort(resv.getDest()) ;
+
+			int portpair[] = findPortPair (resv) ;
+			if (portpair[0]>=0 && portpair[1]>=0) {    // found
+				VisitedPort vpon = visitedports.get(portpair[0]) ;
+				VisitedPort vpoff = visitedports.get(portpair[1]) ;
+
+				vpon.paxOff(resv, vpoff) ;
+				if (vpoff.paxon==0 && vpoff.paxoff==0) {
+					// remove this port from visited list
+					visitedports.remove(portpair[1]) ;
+				}
+				if (vpon.paxon==0 && vpon.paxoff==0) {
+					// remove this port from visited list
+					visitedports.remove(portpair[0]) ;
+				}
+			}
+
+			if (resv.isBlockingVIP()) {
+				blocking_vip = null ;
+			}
+		}
+	}
+
+	public boolean revalidate () {
+		isValid = true ;
+		VisitedPort p = startpos ;
+
+		while (p != null) {
+			isValid = isValid && p.validate() ;
+			Leg la = p.legafter ;
+			if (la != null) {
+				isValid = isValid && la.validate() ;
+				p = la.to ;
+			}
+			else
+				p = null ;
+		}
+		return isValid ;
+	}
+
+	public void showPax () {
+		VisitedPort p = startpos ;
+
+		System.out.println("----------------") ;
+		while (p != null) {
+			Leg la = p.legafter ;
+
+			System.out.println("[" + p + "], paxon = " + p.paxon + ", paxoff=" + p.paxoff);
+			if (la != null) {
+				System.out.println("--[" + la + "], paxonboard = " + la.paxonboard) ;
+				p = la.to ;
+			}
+			else
+				p = null ;
+		}
+	}
+
+	public void addPortAtEnd (Reservation resv) {
+		addPortAtEnd (resv, false) ;
+	}
+
+	public boolean setRefueling (String port, boolean isrefuel) {
+		boolean retval = false ;
+		Port p = scenario.getPort(port) ;
+		int [] idxs = findPort(p) ;
+		if (idxs != null) {
+			for (int i=0; i<idxs.length; i++) {
+				int idx = idxs[i] ;
+				if (idx>=0) {
+					VisitedPort vp = visitedports.get(idx) ;
+					if (vp.setRefueling(isrefuel))
+						retval = true ;
+				}
+			}
+		}
+
+		return retval ;
+	}
+
+	public boolean hasRefuelingActivity () {
+		for (int i=0; i<visitedports.size(); i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			if (vp.isrefueling)
+				return true;
+		}
+		return false ;
+	}
+
+	public void addPortAtEnd (Reservation resv, boolean force) {
+		changed = false ;
+
+		if (startpos == null || endpos == null) {
+			// get default start and ending station from scenario
+			setStartPos (thefleet.startpos) ;
+			setEndPos (thefleet.endpos) ;
+		}
+
+		Port p1 = scenario.getPort(resv.getOrg()) ;
+		Port p2 = scenario.getPort(resv.getDest()) ;
+		VisitedPort firstinserted = null ;
+
+		reservations.put(resv.getId(), resv) ;
+		if (resv.isBlockingVIP())
+			blocking_vip = resv ;
+
+		if (resv.isDummyRefueling())
+			force = true ;
+
+		if (visitedports.isEmpty()) {
+			VisitedPort vp1, vp2 ;
+
+			visitedports.addFirst(startpos) ;
+			firstinserted = startpos ;
+
+			if (startpos.equals(p1)) {
+				vp1 = startpos ;
+			}
+			else {
+				vp1 = new VisitedPort(thefleet,p1) ;
+
+				if (startpos.legafter == null) {
+					startpos.legafter = new Leg(thefleet,startpos, vp1) ;
+					vp1.legbefore = startpos.legafter ;
+				}
+				visitedports.add (vp1) ;
+				lastIndex ++ ;
+			}
+
+
+			if (endpos.equals(p2)) {
+				vp2 = endpos ;
+
+				if (startpos.legafter == null) {
+					startpos.legafter = new Leg(thefleet,startpos, endpos) ;
+					endpos.legbefore = startpos.legafter ;
+				}
+				if (vp1.legafter == null) {
+					vp1.legafter = new Leg(thefleet, vp1, endpos) ;
+					endpos.legbefore = vp1.legafter ;
+				}
+			}
+			else {
+				vp2 = new VisitedPort(thefleet, p2) ;
+
+				visitedports.add (vp2) ;
+				lastIndex ++ ;
+
+				if (startpos.legafter == null) {
+					startpos.legafter = new Leg(thefleet, startpos, vp2) ;
+					vp2.legbefore = startpos.legafter ;
+				}
+				if (vp1.legafter == null) {
+					vp1.legafter = new Leg(thefleet, vp1, vp2) ;
+					vp2.legbefore = vp1.legafter ;
+				}
+
+				vp2.legafter = new Leg (thefleet, vp2, endpos) ;
+				endpos.legbefore = vp2.legafter ;
+			}
+
+			vp1.paxOn (resv, vp2) ;
+
+			if (resv.isDummyRefueling())
+				vp2.setRefueling(true) ;
+
+			visitedports.addLast(endpos) ;
+			changed = true ;
+		}
+		else {
+			int portpair[] = findPortPair (resv) ;
+			if (portpair[0]>=0 && portpair[1]>=0) {    // found
+				// route is not changed
+				// adjust pax on board
+				VisitedPort vpon = visitedports.get(portpair[0]) ;
+				VisitedPort vpoff = visitedports.get(portpair[1]) ;
+
+				vpon.paxOn(resv, vpoff) ;
+				if (resv.isDummyRefueling())
+					vpoff.setRefueling(true) ;
+			}
+			else {  									// if not found
+				VisitedPort vpon = null, vpoff = null;
+				VisitedPort vppref = null, vpnext = null ;
+				int offset = 0 ;
+
+				if (portpair[0]>=0)
+					vpon = visitedports.get(portpair[0]) ;
+				else {
+					int insertion = visitedports.size() - 2 ;
+					assert(insertion>0) ;
+					assert(insertion<visitedports.size()) ;
+
+					vppref = visitedports.get(insertion) ;
+					vpnext = visitedports.get(insertion + 1) ;
+
+					VisitedPort vp1 = new VisitedPort(thefleet,p1) ;
+					visitedports.add(insertion + 1, vp1) ;
+
+					vpon = vp1 ;
+					vppref.legafter.setTo(vp1) ;
+					vp1.legbefore = vppref.legafter ;
+
+					// create new leg (vp1, vpnext)
+					vp1.legafter = new Leg(thefleet, vp1, vpnext) ;
+					vpnext.legbefore= vp1.legafter ;
+
+					offset = 1 ;
+					firstinserted = vp1 ;
+					changed = true ;
+				}
+
+				if (portpair[1]>=0) {
+					vpoff = visitedports.get(offset + portpair[1]) ;
+				}
+				else {
+					int insertion = visitedports.size() - 2 ;
+					assert(insertion>0) ;
+					assert(insertion<visitedports.size()) ;
+
+					vppref = visitedports.get(insertion) ;    // insertion point is the current port
+					vpnext = visitedports.get(insertion + 1) ;
+
+					VisitedPort vp2 = new VisitedPort(thefleet, p2) ;
+					visitedports.add(insertion + 1, vp2) ;    // linked list insertion is based on next index
+
+					if (firstinserted==null)
+						firstinserted = vp2 ;
+
+					vpoff = vp2 ;
+					vppref.legafter.setTo(vp2) ;
+					vp2.legbefore = vppref.legafter ;
+
+					// create new leg (vp1, vpnext)
+					vp2.legafter = new Leg(thefleet, vp2, vpnext) ;
+					vpnext.legbefore= vp2.legafter ;
+
+					changed = true ;
+				}
+
+				vpon.paxOn(resv, vpoff) ;
+				if (resv.isDummyRefueling())
+					vpoff.setRefueling(true) ;
+			}
+		}
+
+		if (thefleet.adjustMTOW())
+			force = true ;
+
+		if (force)
+			adjustFuelForward(startpos) ;
+		else if (changed)
+			adjustFuelForward(firstinserted) ;
+
+		if (!revalidate ())
+			invalidreservations.put(resv.getId(), resv) ;
+
+		// for debug
+		// showPax() ;
+	}
+
+	// Use 2opt heuristic algorithm
+	public Route advanceOptimize () throws RemoteException, CocoException {
+		boolean retval = false ;
+		int count = visitedports.size() ;
+		if (count < 4)
+			return null  ;
+
+		// applied only for cyclic
+		if (! startpos.equals(endpos))
+			return null ;
+
+		Port[] ports = new Port[count] ;
+		for (int i=0; i<ports.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			ports[i] = vp.theport;
+		}
+
+		// skip the return port (it always assume cyclic)
+		count-- ;
+		boolean done = false;
+		for (int i=0; i<count && !done; i++) {
+			Port pi0 = ports[i];
+			Port pi1 = ports[(i+1)%count] ;
+			Double t1 = Route.distanceInMinutes(scenario, pi0, pi1, thefleet.maxspeed) ;
+			done = true ;
+			for(int j = i + 2; j < count; j++) {
+				Port pj0 = ports[j] ;
+				Port pj1 = ports[(j+1)%count] ;
+				t1 += Route.distanceInMinutes(scenario, pj0, pj1, thefleet.maxspeed) ;
+
+				Double t2 = Route.distanceInMinutes(scenario, pi0, pj0, thefleet.maxspeed) ;
+				t2 += Route.distanceInMinutes(scenario, pi1, pj1, thefleet.maxspeed) ;
+
+				if (t1 > t2) {
+					retval = true ;
+					done = false ;
+
+					Port tmp = ports[(i+1) % count] ;
+					ports[(i+1) % count] = ports[j] ;
+					ports[j] = tmp ;
+				}
+			}
+		}
+
+		if (retval) {
+			Route r = rearrange(ports) ;
+			if (r.isValid())
+				thefleet.replaceRoute(r) ;
+
+			return r ;
+		}
+
+		return null ;
+	}
+
+	public int[] findPort(Port p) {
+		int [] retval = null ;
+		if (visitedports.isEmpty())
+			return retval ;
+
+		retval = new int [visitedports.size()] ;
+		Iterator<VisitedPort> ivp = visitedports.iterator() ;
+		int ridx = 0 ;
+		int vidx = 0 ;
+		while (ivp.hasNext()) {
+			VisitedPort vp = ivp.next() ;
+			retval[vidx] = -1 ;
+			if (vp.equals(p))
+				retval[ridx++] = vidx ;
+
+			vidx ++ ;
+		}
+
+		return retval ;
+	}
+
+	public VisitedPort getPortAtIndex (int index) {
+		if (index < 0)
+			return null ;
+		if (index >= visitedports.size())
+			return null ;
+		return visitedports.get(index) ;
+	}
+
+	public int[] findPortPair (Reservation resv) {
+		int [] retval = new int [2] ;
+		retval[0] = -1;
+		retval[1] = -1;
+
+		if (visitedports.isEmpty())
+			return retval ;
+
+		Port p1 = scenario.getPort(resv.getOrg()) ;
+		Port p2 = scenario.getPort(resv.getDest()) ;
+
+		Iterator<VisitedPort> ivp = visitedports.iterator() ;
+		int vidx = 0 ;
+		while (ivp.hasNext()) {
+			VisitedPort vp = ivp.next() ;
+			if (vp.equals(p1) && retval[0]<0) {
+				retval[0] = vidx ;
+			}
+			else if (vp.equals(p2) ) {
+				if (retval[0]<0 || (retval[0]<vidx))
+					retval[1] = vidx ;
+			}
+			vidx ++ ;
+		}
+
+		if (retval[0]>=0 && retval[1]>=0) {
+			if (retval[0]>retval[1]) {
+				retval[0] = retval[1] = -1 ;
+			}
+
+		}
+
+		return retval ;
+	}
+
+
+	public int[] oldfindPortPair (Reservation resv) {
+		int [] retval = new int [2] ;
+		retval[0] = -1;
+		retval[1] = -1;
+
+		if (visitedports.isEmpty())
+			return retval ;
+
+		Port ps[] = new Port[2] ;
+		int index = 0 ;								// start from origin
+		ps[0] = scenario.getPort(resv.getOrg()) ;
+		ps[1] = scenario.getPort(resv.getDest()) ;
+
+		Iterator<VisitedPort> ivp = visitedports.iterator() ;
+		int vidx = 0 ;
+		while (ivp.hasNext() && index<2) {
+			VisitedPort vp = ivp.next() ;
+			if (vp.equals(ps[index])) {
+				retval[index] = vidx ;
+				index ++ ;
+			}
+			vidx ++ ;
+		}
+
+		return retval ;
+	}
+
+
+	public class VisitedPort implements IFuelPoint, IValidationPoint {
+		Port theport ;
+		Fleet thefleet ;
+		int  paxon ;
+		int  paxoff ;
+		Double weighton ;
+		Double weightoff ;
+		Leg  legafter ;
+		Leg  legbefore ;
+		Double fuelneed ;               // minimum fuel needed to go to this port
+		Double fueluploadneed ;         // minimum fuel needed to complete the trip
+		Double payload ;                // maximum passenger kgs
+		boolean pobvalid ;
+		boolean wobvalid ;
+		boolean fuelvalid ;
+		boolean isrefueling ;
+
+		VisitedPort (Fleet thefleet, Port theport) {
+			this.theport = theport ;
+			this.thefleet = thefleet ;
+			paxon = 0 ;
+			paxoff = 0 ;
+			weighton = 0.0 ;
+			weightoff = 0.0 ;
+			fuelneed = 0.0 ;
+			fueluploadneed = 0.0 ;
+			payload = 0.0 ;
+
+			pobvalid = true ;
+			wobvalid = true ;
+			fuelvalid = true ;
+			isrefueling = false ;
+		}
+
+		@Override
+		public boolean equals(Object obj) {
+			if (obj instanceof Port) {
+				return theport.port.equals(((Port)obj).getPort()) ;
+			}
+			else if (obj instanceof VisitedPort) {
+				return theport.port.equals(((VisitedPort)obj).theport.getPort()) ;
+			}
+			return super.equals(obj);
+		}
+
+		public Leg getLegAfter () {
+			return legafter ;
+		}
+
+		public Leg getLegBefore () {
+			return legbefore ;
+		}
+
+		void paxOff (Reservation resv, VisitedPort paxOff) {
+			paxOn (-resv.getQty(), -resv.getWeight(), paxOff, resv) ;
+		}
+
+		void paxOn (Reservation resv, VisitedPort paxOff) {
+			paxOn (resv.getQty(), resv.getWeight(), paxOff, resv) ;
+		}
+
+		void paxOn (int qty, Double weight, VisitedPort paxOff, Reservation resv) {
+			paxon += qty  ;
+			weighton += weight ;
+
+			paxOff.paxoff += qty ;
+			paxOff.weightoff += weight ;
+
+			int prevpax ;
+			Double prevweight ;
+			VisitedPort p = this ;
+			while (p != null) {
+				if (p.legbefore != null) {
+					prevpax = p.legbefore.paxonboard ;
+					prevweight = p.legbefore.weightonboard ;
+				}
+				else {
+					prevpax = 0 ;
+					prevweight = 0.0 ;
+				}
+
+				Leg la = p.legafter ;
+
+				if (la != null) {
+					la.paxonboard = prevpax + p.paxon - p.paxoff ;
+					la.weightonboard = prevweight + p.weighton - p.weightoff ;
+
+					if (qty >= 0)
+						la.addPax(resv) ;
+					else
+						la.removePax(resv) ;
+
+					p = la.to ;
+
+					if (p.equals(paxOff))
+						p = null ;
+				}
+				else
+					p = null ;
+			}
+
+		}
+
+		public Double getPenalty () {
+			return this.theport.getPenalty () ;
+		}
+
+		public boolean setRefueling (boolean isrefuel) {
+			if (this.theport.isrefueling)
+				isrefueling = isrefuel ;
+
+			return isrefueling ;
+		}
+
+		@Override
+		public Double fuelNeed() {
+			return fuelneed ;
+		}
+
+		@Override
+		public String toString() {
+			return this.theport.toString() ;
+		}
+
+		public boolean isPortRefuelEnable(){
+			return this.theport.isrefueling;
+		}
+
+		@Override
+		public boolean validate() {
+			wobvalid = true ;
+			pobvalid = true ;
+			fuelvalid = true ;
+			if (legafter != null) {
+				wobvalid = false ;
+				pobvalid = false ;
+
+				if (payload >= legafter.weightonboard)
+					wobvalid = true ;
+				if (this.thefleet.paxcapacity >= legafter.paxonboard)
+					pobvalid = true ;
+
+				/*
+				try {
+					if (!wobvalid)
+						System.out.println("WOB invalid : (" + this.thefleet.acreg + "," + this.theport.port + ") on route  " + this.thefleet.getRoute()) ;
+					if (!pobvalid)
+						System.out.println("POB invalid : (" + this.thefleet.acreg + "," + this.theport.port + ") on route  " + this.thefleet.getRoute() + " pax on board = " + legafter.paxonboard) ;
+				}
+				catch (Exception e) {
+					e.printStackTrace() ;
+				}
+				*/
+			}
+			if (legbefore != null) {
+				fuelvalid = false ;
+				if (this.fuelNeed()<=thefleet.tankcapacity)
+					fuelvalid = true ;
+
+				/*
+				try {
+					if (!fuelvalid)
+						System.out.println("FUEL invalid : (" + this.thefleet.acreg + "," + this.theport.port + ") on route  " + this.thefleet.getRoute()) ;
+				}
+				catch (Exception e) {
+					e.printStackTrace() ;
+				}
+				*/
+			}
+
+			return wobvalid && pobvalid && fuelvalid;
+		}
+
+		@Override
+		public boolean isPOBValid() {
+			return pobvalid ;
+		}
+
+		@Override
+		public boolean isWOBValid() {
+			return wobvalid ;
+		}
+	}
+
+	public class Leg implements IFuelBurnedJourney,IValidationPoint {
+		VisitedPort from ;
+		VisitedPort to ;
+		Fleet thefleet ;
+
+		int paxonboard ;
+		Double weightonboard ;
+		Double tripFuel ;
+		boolean tripFuelCalculated ;
+		HashMap<Integer, Reservation> reservations ;
+
+		Leg (Fleet thefleet, VisitedPort from, VisitedPort to) {
+			this.thefleet = thefleet ;
+			this.from = from ;
+			this.to = to ;
+			tripFuelCalculated = false ;
+			weightonboard = new Double (0.0) ;
+			tripFuel = new Double (0.0) ;
+
+			reservations = new HashMap<Integer, Reservation>();
+		}
+
+		public void setTo (VisitedPort to) {
+			this.to = to ;
+			tripFuelCalculated = false ;
+		}
+
+		public VisitedPort getTo () {
+			return to ;
+		}
+
+		public VisitedPort getFrom () {
+			return from ;
+		}
+
+		@Override
+		public String toString() {
+			return from.toString() + "-" + to.toString() ;
+		}
+
+		@Override
+		public Double tripFuel() {
+			if (! tripFuelCalculated) {
+				ITripFuelCalc calc = thefleet.getScenario().getTripFuelCalculator() ;
+				tripFuel = calc.fuelNeeded(this) ;
+				tripFuelCalculated = true ;
+			}
+			return tripFuel ;
+		}
+
+		@Override
+		public Double distanceToInMinutes() {
+			return Route.distanceInMinutes(scenario, from.theport, to.theport, thefleet.maxspeed) ;
+		}
+
+		@Override
+		public IFuelConsumer getConsumer() {
+			return thefleet ;
+		}
+
+		@Override
+		public boolean validate() {
+			return this.from.validate() ;
+		}
+
+		@Override
+		public boolean isPOBValid() {
+			return this.from.isPOBValid() ;
+		}
+
+		@Override
+		public boolean isWOBValid() {
+			return this.from.isWOBValid() ;
+		}
+
+		public int getPaxOnBoard () {
+			return paxonboard ;
+		}
+
+		void addPax (Reservation resv) {
+			reservations.put(resv.getId(), resv) ;
+		}
+
+		void removePax (Reservation resv) {
+			reservations.remove(resv.getId()) ;
+		}
+
+		// return array of reservation sorted by display name
+		public List<Reservation> getServedPax () {
+			int count = reservations.size() ;
+			if (count==0)
+				return null ;
+
+			Reservation resvs[] = new Reservation[count] ;
+			Collection<Reservation> colval = reservations.values();
+			colval.toArray(resvs) ;
+			List<Reservation> resvlist = Arrays.asList(resvs) ;
+			Collections.sort (resvlist, Reservation.NAME_ORDER) ;
+
+			return resvlist ;
+		}
+	}
+
+	@Override
+	public String toString() {
+		Iterator<VisitedPort> ivp = visitedports.iterator() ;
+		String routetext = "" ;
+		boolean first = true ;
+		while (ivp.hasNext()) {
+			VisitedPort vp = ivp.next() ;
+			if (!first)
+				routetext = routetext + "-" ;
+			routetext = routetext + vp.theport.port ;
+			first = false ;
+		}
+		return routetext ;
+	}
+
+	public String[] toPortNameArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		String[] ports = new String[visitedports.size()] ;
+		for (int i=0; i<ports.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			ports[i] = vp.theport.getPort() ;
+		}
+		return ports ;
+	}
+
+	public Integer getTankCapacity(){
+		Double tc = thefleet.tankcapacity;
+		return tc.intValue();
+	}
+
+	public boolean[] getRefuelingCapability () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		boolean[] ports = new boolean[visitedports.size()] ;
+		for (int i=0; i<ports.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			ports[i] = vp.isPortRefuelEnable() ;
+		}
+		return ports ;
+	}
+
+	public boolean[] getRefuelingStatus () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		boolean[] ports = new boolean[visitedports.size()] ;
+		for (int i=0; i<ports.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			ports[i] = vp.isrefueling ;
+		}
+		return ports ;
+	}
+
+	public Integer [] toTOWArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		Integer[] tow = new Integer[visitedports.size()] ;
+		for (int i=0; i<tow.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			Double payload = 0.0D ;
+			if (vp.getLegAfter() != null) 
+				payload += vp.getLegAfter().weightonboard ;
+			
+			Double d = vp.fueluploadneed + thefleet.eew + payload ;
+			tow[i] = d.intValue() ;
+		}
+		return tow ;
+	}
+
+	// maximum fuel consumption
+	public Integer [] toMaxFuelUploadArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		Integer[] fuels = new Integer[visitedports.size()] ;
+		for (int i=0; i<fuels.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			Double maxfuel = thefleet.mtow - vp.getPenalty() - thefleet.eew - vp.payload ;
+			if (maxfuel > thefleet.tankcapacity)
+				maxfuel = thefleet.tankcapacity ;
+
+			if (maxfuel < vp.fueluploadneed)
+				maxfuel = vp.fueluploadneed ;
+			fuels[i] = maxfuel.intValue() ;
+		}
+		return fuels ;
+	}
+
+
+	// minimum fuel consumption
+	public Integer [] toFuelUploadArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		Integer[] fuels = new Integer[visitedports.size()] ;
+		for (int i=0; i<fuels.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			fuels[i] = vp.fueluploadneed.intValue() ;
+		}
+		return fuels ;
+	}
+
+	// maximum payload
+	public Integer [] toMaxPayLoadArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		Integer[] fuels = new Integer[visitedports.size()] ;
+		for (int i=0; i<fuels.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			Double maxpayload = thefleet.mtow - vp.getPenalty() - thefleet.eew - vp.fueluploadneed ;
+			fuels[i] = maxpayload.intValue() ;
+		}
+		return fuels ;
+	}
+
+
+	// current payload
+	public Integer [] toPayLoadArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		Integer[] fuels = new Integer[visitedports.size()] ;
+		for (int i=0; i<fuels.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			fuels[i] = vp.payload.intValue() ;
+		}
+		return fuels ;
+	}
+
+	public boolean [] toFuelValidityArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		boolean[] fuelvalidity = new boolean[visitedports.size()] ;
+		for (int i=0; i<fuelvalidity.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			fuelvalidity[i] = vp.fuelvalid ;
+		}
+		return fuelvalidity ;
+	}
+
+	public boolean isValid () {
+		for (int i=0; i<visitedports.size(); i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			if (!vp.isPOBValid())
+				return false ;
+
+			if (!vp.isWOBValid())
+				return false ;
+
+			if (!vp.fuelvalid)
+				return false ;
+		}
+
+		return true ;
+	}
+
+	public boolean [] toPOBValidityArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		boolean[] pobvalidity = new boolean[visitedports.size()] ;
+		for (int i=0; i<pobvalidity.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			pobvalidity[i] = vp.isPOBValid() ;
+		}
+		return pobvalidity ;
+	}
+
+	public boolean [] toWOBValidityArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		boolean[] wobvalidity = new boolean[visitedports.size()] ;
+		for (int i=0; i<wobvalidity.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			wobvalidity[i] = vp.isWOBValid() ;
+		}
+		return wobvalidity ;
+	}
+
+	// return list of Pax On/Off in string as : x/y whereas x = pax-on, y = pax-off
+	public String [] toPaxOnOffArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		String[] poo = new String[visitedports.size()] ;
+		for (int i=0; i<poo.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			poo[i] = vp.paxon + "/" + vp.paxoff;
+		}
+		return poo ;
+	}
+
+	public Integer [] toWeightOnOffArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		Integer[] weightonoffs = new Integer[visitedports.size()] ;
+		for (int i=0; i<weightonoffs.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			Leg l = vp.legafter;
+			if (l != null) {
+				if (l.weightonboard != null) {
+					Double weightob = l.weightonboard;
+					if (weightob > 0) {
+						weightonoffs[i] = weightob.intValue();
+					} else {
+						weightonoffs[i] = 0;
+					}
+				} else {
+					weightonoffs[i] = 0;
+				}
+			} else {
+				weightonoffs[i] = 0;
+			}
+		}
+		return weightonoffs ;
+	}
+
+	public Integer [] toPaxOnArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		Integer[] paxons = new Integer[visitedports.size()] ;
+		for (int i=0; i<paxons.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			paxons[i] = vp.paxon ;
+		}
+		return paxons ;
+	}
+
+	public Integer [] toPaxOffArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		Integer[] paxoffs = new Integer[visitedports.size()] ;
+		for (int i=0; i<paxoffs.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			paxoffs[i] = vp.paxoff ;
+		}
+		return paxoffs ;
+	}
+
+	public Integer [] toFuelNeedArray () {
+		if (visitedports.isEmpty())
+			return null ;
+
+		Integer[] fuels = new Integer[visitedports.size()] ;
+		for (int i=0; i<fuels.length; i++) {
+			VisitedPort vp = visitedports.get(i) ;
+			fuels[i] = vp.fuelneed.intValue() ;
+		}
+		return fuels ;
+	}
+
+	@Override
+	public Double tripFuel() {
+		Double fuelneed = 0.0;
+		if (startpos != null)
+			return startpos.fueluploadneed ;
+
+		return fuelneed;
+	}
+
+	@Override
+	public Double distanceToInMinutes() {
+		int cnt = 0 ;
+		Double distance = 0.0 ;
+		VisitedPort p = startpos ;
+
+		while (p != null) {
+			Leg la = p.legafter ;
+			if (la != null) {
+				distance += la.distanceToInMinutes() ;
+				p = la.to ;
+				cnt ++ ;
+			}
+			else
+				p = null ;
+		}
+
+		// adjust with ground time
+		distance += (cnt * thefleet.groundtime) ;
+
+		return distance ;
+	}
+
+	@Override
+	public IFuelConsumer getConsumer() {
+		return thefleet ;
+	}
+
+	static Double distanceInMinutes(FlightScenario scenario, Port p1, Port p2, Double maxspeed) {
+		Distance dist = scenario.getDistance(p1, p2) ;
+		if (dist == null)
+			dist = Distance.getTempDistance(scenario, p1, p2, maxspeed) ;
+
+		if (scenario.getCalculationBase() == Configuration.CALCBASE_DISTANCE) {
+			Double tas = maxspeed ;
+			return 60 * dist.getInNMI() / tas ;
+		}
+		else
+			return dist.getInMinutes() ;
+	}
+
+}

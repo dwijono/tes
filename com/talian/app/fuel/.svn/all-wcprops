@@ -1,0 +1,35 @@
+K 25
+svn:wc:ra_dav:version-url
+V 78
+/svn/projects/!svn/ver/1279/Stema/New/coco001/sources/heli/com/talian/app/fuel
+END
+IFuelBurnedJourney.java
+K 25
+svn:wc:ra_dav:version-url
+V 102
+/svn/projects/!svn/ver/1123/Stema/New/coco001/sources/heli/com/talian/app/fuel/IFuelBurnedJourney.java
+END
+IFuelConsumer.java
+K 25
+svn:wc:ra_dav:version-url
+V 97
+/svn/projects/!svn/ver/1123/Stema/New/coco001/sources/heli/com/talian/app/fuel/IFuelConsumer.java
+END
+ITripFuelCalc.java
+K 25
+svn:wc:ra_dav:version-url
+V 97
+/svn/projects/!svn/ver/1123/Stema/New/coco001/sources/heli/com/talian/app/fuel/ITripFuelCalc.java
+END
+SimpleFuelCalc.java
+K 25
+svn:wc:ra_dav:version-url
+V 98
+/svn/projects/!svn/ver/1279/Stema/New/coco001/sources/heli/com/talian/app/fuel/SimpleFuelCalc.java
+END
+IFuelPoint.java
+K 25
+svn:wc:ra_dav:version-url
+V 94
+/svn/projects/!svn/ver/1123/Stema/New/coco001/sources/heli/com/talian/app/fuel/IFuelPoint.java
+END

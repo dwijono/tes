@@ -1,0 +1,106 @@
+/*
+ *
+ * 
+ *
+ * (C) COPYRIGHT Talian Limited, 2011
+ *
+ * The source code for this program is not published or otherwise
+ * divested of its trade secrets.
+ *
+ */
+package com.talian.beans.schedulling;
+
+import java.io.IOException ;
+import java.text.DateFormat ;
+import java.text.ParseException ;
+import java.text.SimpleDateFormat ;
+import java.util.Date ;
+import java.util.Iterator ;
+import java.util.List ;
+import java.util.Map ;
+
+import org.apache.commons.fileupload.FileItem ;
+
+import psdi.util.CocoException ;
+import psdi.util.MXSession ;
+
+import com.softwarementors.extjs.djn.config.annotations.DirectFormPostMethod ;
+import com.softwarementors.extjs.djn.config.annotations.DirectMethod ;
+import com.softwarementors.extjs.djn.config.annotations.DirectPollMethod ;
+import com.talian.app.heli.HeliServiceRemote ;
+import com.talian.beans.common.Web20Bean ;
+
+/**
+ * @author Seno
+ *
+ */
+public class SchedullingBean extends Web20Bean {
+	
+	@DirectPollMethod( event="log")
+	public String handleMessagePoll(Map<String,String> parameters) {
+		assert parameters != null;
+		
+	    setupContext () ;
+	    try {
+	    	MXSession s = this.getMXSession() ;
+	    	if (s == null)
+	    		return "" ;
+	    	
+	    	if (s.isConnected()) {
+	    		String result = "" ;
+	    		HeliServiceRemote scheduller = (HeliServiceRemote)s.lookup("HELI") ;
+	    		List<String> logs = scheduller.getServiceLog() ;
+	    		Iterator<String> it = logs.iterator() ;
+	    		while (it.hasNext()) {
+	    			result = result + it.next() + "<BR/>" ;
+	    		}
+	    		return result ;
+	    	}
+		}
+		catch (Exception e) {
+			e.printStackTrace();
+		}
+	    
+	    return "" ;
+	}
+	
+    public static class Result {
+    	public Integer duration = 0 ;
+	    public String remarks = "";
+    }
+	
+	@SuppressWarnings("deprecation")
+	@DirectFormPostMethod
+	public Result djnform_handleSubmit( Map<String, String> formParameters, Map<String, FileItem> fileFields ) throws IOException, ParseException  {
+	    assert formParameters != null; 
+	    assert fileFields != null; 
+
+	    Result result = new Result();
+	    String flightsession = formParameters.get("flightsession") ;
+	    String sDate = formParameters.get("transdate") ;
+	    
+	    setupContext () ;
+	    MXSession s = this.getMXSession() ;
+	    try {
+		    DateFormat df = new SimpleDateFormat("MM/dd/yyyy");
+		    Date tripDate = df.parse(sDate) ;
+
+		    HeliServiceRemote scheduller = (HeliServiceRemote)s.lookup("HELI") ;
+			scheduller.runScheduller(tripDate, flightsession) ;
+			
+		    result.duration = 100 ;
+		    result.remarks = "OK" ;
+		}
+		catch (CocoException e) {
+			result.duration = 0 ;
+			result.remarks = "<b>Exception occured : " + e.getDisplayMessage() + "</b>" ;
+			
+			e.printStackTrace();
+		}
+		
+	    
+	    return result;	    
+	}
+	
+	
+}
